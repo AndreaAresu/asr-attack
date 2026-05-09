@@ -1,0 +1,83 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "asr-attack"
+version = "0.1.0"
+description = "Adversarial robustness toolkit for Hugging Face ASR models"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Andrea Aresu", email = "aaresu01@gmail.com" }]
+keywords = [
+    "asr",
+    "speech-recognition",
+    "adversarial",
+    "robustness",
+    "huggingface",
+    "whisper",
+    "wav2vec2",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.1",
+    "torchaudio>=2.1",
+    "transformers>=4.40",
+    "datasets>=2.18",
+    "jiwer>=3.0",
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+    "soundfile>=0.12",
+    "tqdm>=4.65",
+    "jinja2>=3.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/andreaaresu/asr-attack"
+Repository = "https://github.com/andreaaresu/asr-attack"
+Issues = "https://github.com/andreaaresu/asr-attack/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["asr_attack"]
+
+[tool.hatch.build.targets.sdist]
+include = ["asr_attack", "LICENSE", "pyproject.toml"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "slow: tests that download Hugging Face models or datasets (network + minutes)",
+]
+
