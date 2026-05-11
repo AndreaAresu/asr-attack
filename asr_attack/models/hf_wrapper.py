@@ -110,6 +110,24 @@ class HFASRModel:
         """Either ``"ctc"`` or ``"seq2seq"`` once the model is loaded."""
         return self._kind
 
+    @property
+    def supports_waveform_gradient(self) -> bool:
+        """True if gradient-based attacks on the raw waveform are supported.
+
+        Holds for CTC models whose forward takes ``input_values`` directly
+        (the wav2vec2 family: wav2vec2, HuBERT, WavLM, UniSpeech, SEW,
+        data2vec-audio, MMS, ...). Returns False for CTC models whose input
+        is a mel-spectrogram (M-CTC-T) and for seq2seq models like Whisper —
+        both would need a torch-side feature extractor to make the gradient
+        flow back to the waveform.
+        """
+        if self._model is None:
+            return False
+        if self._kind != "ctc":
+            return False
+        main_input = getattr(self._model, "main_input_name", "")
+        return main_input == "input_values"
+
     def _padding_kwargs(self) -> dict[str, Any]:
         # Whisper-style encoders need a fixed 30s mel-spec tensor; CTC encoders
         # work with the longest waveform in the batch.
@@ -211,15 +229,21 @@ class HFASRModel:
     ) -> torch.Tensor:
         """Teacher-forcing loss between the model's output on `audio` and `target`.
 
-        For CTC models the gradient flows back through `input_values` to the
-        waveform, supporting white-box attacks. For seq2seq models the standard
-        feature extractor is non-differentiable, so the returned scalar is
-        useful for diagnostics but attacks need a torch-side mel computation.
+        When ``audio`` is a ``torch.Tensor`` and the model is CTC-style, the
+        whole pipeline runs in torch (resampling, normalization, forward) so
+        the gradient flows back to the input waveform — this is the path
+        exercised by white-box attacks like FGSM/PGD. Otherwise the standard
+        processor handles the input numerically and the returned loss is a
+        scalar without a usable gradient w.r.t. the waveform.
         """
         if self._model is None or self._processor is None:
             raise RuntimeError("Model not loaded. Use HFASRModel.from_pretrained(...).")
 
         src_sr = sample_rate if sample_rate is not None else self.sample_rate
+
+        if isinstance(audio, torch.Tensor) and self.supports_waveform_gradient:
+            return self._ctc_loss_torch(audio, target, src_sr)
+
         audio_np = _to_float32_array(audio)
         if src_sr != self.sample_rate:
             audio_np = _resample(audio_np, src_sr, self.sample_rate)
@@ -236,4 +260,46 @@ class HFASRModel:
         label_ids = tokenizer(target, return_tensors="pt").input_ids.to(self.device)
 
         outputs = self._model(**inputs, labels=label_ids)
+        return outputs.loss
+
+    def _ctc_loss_torch(
+        self,
+        audio_tensor: torch.Tensor,
+        target: str,
+        src_sr: int,
+    ) -> torch.Tensor:
+        """CTC loss path that keeps the autograd chain attached to the waveform."""
+        if not self.supports_waveform_gradient:
+            raise NotImplementedError(
+                f"Model {self.model_id!r} does not support waveform-level "
+                f"gradients (kind={self._kind!r}, main_input_name="
+                f"{getattr(self._model, 'main_input_name', '?')!r}). "
+                "Currently only CTC models with raw-waveform input are wired "
+                "up (wav2vec2 family: wav2vec2, HuBERT, WavLM, UniSpeech, "
+                "MMS, ...). M-CTC-T (mel-spec input) and seq2seq models "
+                "(Whisper, SpeechT5) need a torch-side feature extractor."
+            )
+        audio_tensor = audio_tensor.to(device=self.device, dtype=torch.float32)
+        if audio_tensor.dim() == 1:
+            audio_tensor = audio_tensor.unsqueeze(0)
+
+        if src_sr != self.sample_rate:
+            # torchaudio's resample is conv1d under the hood — differentiable.
+            audio_tensor = TAF.resample(
+                audio_tensor, orig_freq=src_sr, new_freq=self.sample_rate
+            )
+
+        # Replicate the wav2vec2 feature extractor's per-utterance zero-mean,
+        # unit-variance normalization in torch. Matches the numpy formula
+        # `(x - x.mean()) / sqrt(x.var() + 1e-7)` exactly (population variance).
+        feature_extractor = getattr(self._processor, "feature_extractor", None)
+        if feature_extractor is not None and getattr(feature_extractor, "do_normalize", False):
+            mean = audio_tensor.mean(dim=-1, keepdim=True)
+            var = audio_tensor.var(dim=-1, keepdim=True, unbiased=False)
+            audio_tensor = (audio_tensor - mean) / torch.sqrt(var + 1e-7)
+
+        tokenizer = self._processor.tokenizer
+        label_ids = tokenizer(target, return_tensors="pt").input_ids.to(self.device)
+
+        outputs = self._model(input_values=audio_tensor, labels=label_ids)
         return outputs.loss
