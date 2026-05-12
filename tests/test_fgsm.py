@@ -30,6 +30,11 @@ def wav2vec2() -> HFASRModel:
 
 
 @pytest.fixture(scope="module")
+def whisper_tiny() -> HFASRModel:
+    return HFASRModel.from_pretrained("openai/whisper-tiny", device="cpu")
+
+
+@pytest.fixture(scope="module")
 def librispeech_sample() -> dict:
     audio_feature = datasets.Audio(decode=False)
     ds = datasets.load_dataset(DATASET_ID, "clean", split="validation").cast_column(
@@ -99,14 +104,62 @@ def test_fgsm_attack_object_attributes() -> None:
     assert attack.name == "fgsm"
 
 
-@pytest.mark.slow
 def test_fgsm_rejects_models_without_waveform_gradient() -> None:
-    """FGSM must refuse models that don't expose a waveform-level gradient
-    (e.g. Whisper, M-CTC-T), with a clear NotImplementedError."""
-    whisper = HFASRModel.from_pretrained("openai/whisper-tiny", device="cpu")
-    assert whisper.supports_waveform_gradient is False
+    """FGSM rejects any model whose `supports_waveform_gradient` is False
+    (e.g. M-CTC-T, SpeechT5, S2T) with a clear NotImplementedError.
+
+    We don't load a real unsupported model — the property is the contract,
+    and an unloaded ``HFASRModel`` already exercises the False branch.
+    """
+    fake = HFASRModel(model_id="not-a-real-model", device="cpu")
+    assert fake.supports_waveform_gradient is False
 
     attack = Attack.fgsm(epsilon=0.01)
     audio = np.zeros(16000, dtype=np.float32)
     with pytest.raises(NotImplementedError, match="waveform"):
-        attack.perturb(audio, sample_rate=16000, model=whisper)
+        attack.perturb(audio, sample_rate=16000, model=fake)
+
+
+@pytest.mark.slow
+def test_whisper_tiny_supports_waveform_gradient(whisper_tiny: HFASRModel) -> None:
+    assert whisper_tiny.kind == "seq2seq"
+    assert whisper_tiny.supports_waveform_gradient is True
+
+
+@pytest.mark.slow
+def test_fgsm_increases_wer_on_whisper(
+    whisper_tiny: HFASRModel,
+    librispeech_sample: dict,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """FGSM via the torch-side mel extractor degrades Whisper-tiny's WER."""
+    audio = librispeech_sample["array"]
+    sr = librispeech_sample["sampling_rate"]
+    reference = librispeech_sample["text"]
+
+    clean_hyp = whisper_tiny.transcribe(audio, sample_rate=sr).text
+    clean_wer = compute_wer([reference], [clean_hyp])
+
+    attack = Attack.fgsm(epsilon=0.05)
+    adv_audio = attack.perturb(audio, sample_rate=sr, model=whisper_tiny)
+
+    assert adv_audio.shape == audio.shape
+    assert adv_audio.dtype == np.float32
+    linf = float(np.abs(adv_audio - audio).max())
+    assert linf <= attack.epsilon + 1e-6
+
+    adv_hyp = whisper_tiny.transcribe(adv_audio, sample_rate=sr).text
+    adv_wer = compute_wer([reference], [adv_hyp])
+
+    print(f"\n  whisper-tiny FGSM (epsilon={attack.epsilon}):")
+    print(f"  reference: {reference}")
+    print(f"  clean:     {clean_hyp}")
+    print(f"  adv:       {adv_hyp}")
+    print(f"  clean WER: {clean_wer:.3f}")
+    print(f"  adv WER:   {adv_wer:.3f}")
+    print(f"  L_inf:     {linf:.4f}")
+
+    assert adv_wer > clean_wer, (
+        f"FGSM did not degrade Whisper-tiny: clean WER {clean_wer:.3f}, "
+        f"adv WER {adv_wer:.3f}"
+    )

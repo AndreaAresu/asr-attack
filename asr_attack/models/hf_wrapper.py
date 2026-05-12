@@ -114,19 +114,21 @@ class HFASRModel:
     def supports_waveform_gradient(self) -> bool:
         """True if gradient-based attacks on the raw waveform are supported.
 
-        Holds for CTC models whose forward takes ``input_values`` directly
-        (the wav2vec2 family: wav2vec2, HuBERT, WavLM, UniSpeech, SEW,
-        data2vec-audio, MMS, ...). Returns False for CTC models whose input
-        is a mel-spectrogram (M-CTC-T) and for seq2seq models like Whisper —
-        both would need a torch-side feature extractor to make the gradient
-        flow back to the waveform.
+        - CTC + ``input_values`` (the wav2vec2 family: wav2vec2, HuBERT,
+          WavLM, UniSpeech, SEW, data2vec-audio, MMS, ...) → True.
+        - Whisper (seq2seq) → True via a torch-side log-mel extractor.
+        - Other seq2seq (SpeechT5, S2T) and M-CTC-T (CTC over mel) → False
+          until their feature extractors are reimplemented in torch.
         """
         if self._model is None:
             return False
-        if self._kind != "ctc":
-            return False
-        main_input = getattr(self._model, "main_input_name", "")
-        return main_input == "input_values"
+        if self._kind == "ctc":
+            main_input = getattr(self._model, "main_input_name", "")
+            return main_input == "input_values"
+        if self._kind == "seq2seq":
+            model_type = getattr(self._model.config, "model_type", "")
+            return model_type == "whisper"
+        return False
 
     def _padding_kwargs(self) -> dict[str, Any]:
         # Whisper-style encoders need a fixed 30s mel-spec tensor; CTC encoders
@@ -242,7 +244,10 @@ class HFASRModel:
         src_sr = sample_rate if sample_rate is not None else self.sample_rate
 
         if isinstance(audio, torch.Tensor) and self.supports_waveform_gradient:
-            return self._ctc_loss_torch(audio, target, src_sr)
+            if self._kind == "ctc":
+                return self._ctc_loss_torch(audio, target, src_sr)
+            if self._kind == "seq2seq":
+                return self._whisper_loss_torch(audio, target, src_sr)
 
         audio_np = _to_float32_array(audio)
         if src_sr != self.sample_rate:
@@ -302,4 +307,85 @@ class HFASRModel:
         label_ids = tokenizer(target, return_tensors="pt").input_ids.to(self.device)
 
         outputs = self._model(input_values=audio_tensor, labels=label_ids)
+        return outputs.loss
+
+    def _whisper_log_mel_torch(self, audio_tensor: torch.Tensor) -> torch.Tensor:
+        """Compute Whisper's log-mel spectrogram in torch (autograd preserved).
+
+        Input shape: ``[batch, samples]`` at ``self.sample_rate`` (16 kHz).
+        Output shape: ``[batch, n_mels, n_frames]`` (typically ``[B, 80, 3000]``).
+
+        Replicates the openai/whisper reference and HF's numpy version:
+        pad/truncate to 30 s, periodic Hann window, ``torch.stft`` with
+        ``center=True`` (reflect pad), drop the trailing frame to land on
+        ``n_frames`` exactly, apply HF's precomputed Slaney mel filterbank,
+        ``log10`` with a 1e-10 floor, clamp to peak-minus-8 dB, then rescale.
+        """
+        fe = self._processor.feature_extractor
+        n_fft = int(fe.n_fft)
+        hop_length = int(fe.hop_length)
+        n_samples = int(fe.chunk_length * fe.sampling_rate)
+
+        cur_len = audio_tensor.shape[-1]
+        if cur_len < n_samples:
+            audio_tensor = torch.nn.functional.pad(audio_tensor, (0, n_samples - cur_len))
+        elif cur_len > n_samples:
+            audio_tensor = audio_tensor[..., :n_samples]
+
+        window = torch.hann_window(n_fft, device=audio_tensor.device, dtype=audio_tensor.dtype)
+        stft = torch.stft(
+            audio_tensor,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            window=window,
+            center=True,
+            pad_mode="reflect",
+            return_complex=True,
+        )
+        magnitudes = stft[..., :-1].abs() ** 2  # [B, n_freq, n_frames]
+
+        mel_filters_np = np.asarray(fe.mel_filters, dtype=np.float32)
+        mel_filters = (
+            torch.from_numpy(mel_filters_np)
+            .to(device=audio_tensor.device, dtype=audio_tensor.dtype)
+            .T  # HF stores (n_freq, n_mels); matmul wants (n_mels, n_freq).
+        )
+        mel_spec = mel_filters @ magnitudes  # [B, n_mels, n_frames]
+
+        log_spec = torch.clamp(mel_spec, min=1e-10).log10()
+        log_spec_max = log_spec.amax(dim=(-2, -1), keepdim=True)
+        log_spec = torch.maximum(log_spec, log_spec_max - 8.0)
+        log_spec = (log_spec + 4.0) / 4.0
+        return log_spec
+
+    def _whisper_loss_torch(
+        self,
+        audio_tensor: torch.Tensor,
+        target: str,
+        src_sr: int,
+    ) -> torch.Tensor:
+        """Whisper cross-entropy loss with autograd preserved from the waveform.
+
+        Resamples to 16 kHz with ``torchaudio.functional.resample`` (conv1d,
+        differentiable), computes the log-mel in torch, and forwards through
+        the model with ``labels=`` so the loss is computed internally. The
+        special-prefix tokens are intentionally omitted from the labels —
+        their absence shifts the absolute loss value but does not break the
+        gradient direction we need for FGSM/PGD.
+        """
+        audio_tensor = audio_tensor.to(device=self.device, dtype=torch.float32)
+        if audio_tensor.dim() == 1:
+            audio_tensor = audio_tensor.unsqueeze(0)
+
+        if src_sr != self.sample_rate:
+            audio_tensor = TAF.resample(
+                audio_tensor, orig_freq=src_sr, new_freq=self.sample_rate
+            )
+
+        log_mel = self._whisper_log_mel_torch(audio_tensor)
+
+        tokenizer = self._processor.tokenizer
+        label_ids = tokenizer(target, return_tensors="pt").input_ids.to(self.device)
+
+        outputs = self._model(input_features=log_mel, labels=label_ids)
         return outputs.loss

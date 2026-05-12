@@ -5,8 +5,9 @@ MMS, ...). Apply attacks like FGSM, PGD, noise injection, and environmental
 degradation, then measure the impact with WER/CER on standard datasets.
 
 > **Status:** early alpha. FGSM is implemented end-to-end against the wav2vec2
-> family of CTC models. PGD, noise, and environment attacks are stubs that
-> raise `NotImplementedError`. `run_benchmark` is also a stub.
+> family of CTC models and against Whisper (via a torch-side log-mel
+> extractor). PGD, noise, and environment attacks are stubs that raise
+> `NotImplementedError`. `run_benchmark` is also a stub.
 
 ## Install
 
@@ -46,8 +47,9 @@ gate these attacks.
 | wav2vec2 / wav2vec2-conformer | ✓ | ✓ |
 | HuBERT, WavLM, UniSpeech(-SAT), SEW(-D), data2vec-audio | ✓ | ✓ |
 | MMS | ✓ | ✓ |
+| Whisper (tiny / base / small / medium / large / large-v2 / large-v3) | ✓ | ✓ (torch-side log-mel) |
 | M-CTC-T | ✓ | ✗ (mel-spec input, no torch-side extractor yet) |
-| Whisper, SpeechT5, S2T (seq2seq) | ✓ | ✗ (mel-spec input, no torch-side extractor yet) |
+| SpeechT5, S2T (seq2seq, non-Whisper) | ✓ | ✗ (no torch-side extractor yet) |
 
 Black-box attacks (noise, environment) work for every model in the table,
 once implemented.
