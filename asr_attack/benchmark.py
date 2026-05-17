@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import soundfile as sf
+import torch
 from tqdm.auto import tqdm
 
 from asr_attack.attacks.base import Attack
@@ -20,6 +21,17 @@ SampleTuple = tuple[np.ndarray, int, str]
 DatasetLike = str | Iterable[SampleTuple]
 
 
+def _benchmark_default_device() -> str:
+    """CUDA if available, else CPU. We deliberately skip MPS as a default:
+    PyTorch on MPS does not implement ``aten::_ctc_loss``, which would crash
+    any FGSM/PGD run on a CTC model (wav2vec2 family). Users on Mac who only
+    need transcription / black-box attacks can pass ``device="mps"`` explicitly.
+    """
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
 def run_benchmark(
     model: HFASRModel | str,
     attack: Attack,
@@ -29,6 +41,7 @@ def run_benchmark(
     config: str | None = None,
     text_column: str = "text",
     audio_column: str = "audio",
+    device: str | None = None,
     verbose: bool = True,
 ) -> Report:
     """Evaluate an ASR model under an adversarial ``attack`` over ``dataset``.
@@ -51,6 +64,12 @@ def run_benchmark(
             ``"sentence"``.
         audio_column: name of the audio column. Almost always ``"audio"`` on
             modern HF datasets.
+        device: device to load the model on (only used when ``model`` is a
+            string). Defaults to ``"cuda"`` if available else ``"cpu"``.
+            **MPS is intentionally never the default**: PyTorch on MPS lacks
+            ``aten::_ctc_loss``, which would crash FGSM/PGD on CTC models.
+            Pass ``device="mps"`` explicitly if you only need transcription
+            or black-box attacks.
         verbose: show a tqdm progress bar.
 
     Returns:
@@ -60,9 +79,10 @@ def run_benchmark(
         WERs).
     """
     if isinstance(model, str):
+        chosen_device = device or _benchmark_default_device()
         if verbose:
-            print(f"Loading model {model}...")
-        model = HFASRModel.from_pretrained(model)
+            print(f"Loading model {model} on {chosen_device}...")
+        model = HFASRModel.from_pretrained(model, device=chosen_device)
 
     dataset_label = dataset if isinstance(dataset, str) else "<iterable>"
     sample_iter = _resolve_dataset(
