@@ -4,9 +4,9 @@ Adversarial robustness toolkit for Hugging Face ASR models (Whisper, wav2vec2,
 MMS, ...). Apply attacks like FGSM, PGD, noise injection, and environmental
 degradation, then measure the impact with WER/CER on standard datasets.
 
-> **Status:** early alpha. FGSM is implemented end-to-end against the wav2vec2
-> family of CTC models and against Whisper (via a torch-side log-mel
-> extractor). PGD, noise, and environment attacks are stubs that raise
+> **Status:** early alpha. FGSM and PGD are implemented end-to-end against
+> the wav2vec2 family of CTC models and against Whisper (via a torch-side
+> log-mel extractor). Noise and environment attacks are stubs that raise
 > `NotImplementedError`. `run_benchmark` is also a stub.
 
 ## Install
@@ -29,6 +29,7 @@ reference: str = "..."    # ground-truth transcription
 clean_hyp = model.transcribe(audio, sample_rate=16000).text
 
 attack = Attack.fgsm(epsilon=0.02)
+# stronger alternative: Attack.pgd(epsilon=0.02, alpha=0.005, n_steps=10)
 adv_audio = attack.perturb(audio, sample_rate=16000, model=model)
 adv_hyp = model.transcribe(adv_audio, sample_rate=16000).text
 
