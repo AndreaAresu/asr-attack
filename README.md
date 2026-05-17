@@ -4,10 +4,12 @@ Adversarial robustness toolkit for Hugging Face ASR models (Whisper, wav2vec2,
 MMS, ...). Apply attacks like FGSM, PGD, noise injection, and environmental
 degradation, then measure the impact with WER/CER on standard datasets.
 
-> **Status:** early alpha. FGSM and PGD are implemented end-to-end against
-> the wav2vec2 family of CTC models and against Whisper (via a torch-side
-> log-mel extractor). Noise and environment attacks are stubs that raise
-> `NotImplementedError`. `run_benchmark` is also a stub.
+> **Status:** early alpha. All four attack families are implemented: FGSM
+> and PGD (white-box, gradient-based) against the wav2vec2 family and
+> Whisper; noise injection (Gaussian / uniform at a target SNR) and
+> environmental degradation (impulse-response reverb + background mixing)
+> as black-box attacks that work against any ASR model. `run_benchmark`
+> is still a stub.
 
 ## Install
 
@@ -52,8 +54,9 @@ gate these attacks.
 | M-CTC-T | ✓ | ✗ (mel-spec input, no torch-side extractor yet) |
 | SpeechT5, S2T (seq2seq, non-Whisper) | ✓ | ✗ (no torch-side extractor yet) |
 
-Black-box attacks (noise, environment) work for every model in the table,
-once implemented.
+Black-box attacks (`Attack.noise`, `Attack.environment`) need no gradient
+and work for every model in the table, including the rows where white-box
+attacks are not (yet) supported.
 
 ## Development
 
