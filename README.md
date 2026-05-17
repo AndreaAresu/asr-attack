@@ -9,7 +9,8 @@ degradation, then measure the impact with WER/CER on standard datasets.
 > Whisper; noise injection (Gaussian / uniform at a target SNR) and
 > environmental degradation (impulse-response reverb + background mixing)
 > as black-box attacks that work against any ASR model. `run_benchmark`
-> is still a stub.
+> orchestrates a full evaluation and produces a `Report` with text /
+> JSON / self-contained HTML output.
 
 ## Install
 
@@ -17,7 +18,28 @@ degradation, then measure the impact with WER/CER on standard datasets.
 uv add asr-attack       # or: pip install asr-attack
 ```
 
-## Quickstart (what works today)
+## Quickstart
+
+End-to-end benchmark on a Hugging Face dataset:
+
+```python
+from asr_attack import Attack, run_benchmark
+
+attack = Attack.fgsm(epsilon=0.02)
+report = run_benchmark(
+    model="facebook/wav2vec2-base-960h",
+    attack=attack,
+    dataset="hf-internal-testing/librispeech_asr_dummy",
+    n_samples=10,
+    split="validation",
+    config="clean",
+)
+print(report.summary())
+report.to_html("report.html")   # self-contained HTML with charts
+report.to_json("report.json")
+```
+
+Or apply an attack manually:
 
 ```python
 import numpy as np
@@ -26,7 +48,7 @@ from asr_attack.metrics.wer import compute_wer
 
 model = HFASRModel.from_pretrained("facebook/wav2vec2-base-960h")
 audio: np.ndarray = ...   # 1-D float32 waveform in [-1, 1]
-reference: str = "..."    # ground-truth transcription
+reference: str = "..."
 
 clean_hyp = model.transcribe(audio, sample_rate=16000).text
 
