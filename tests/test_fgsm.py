@@ -12,6 +12,7 @@ import io
 import numpy as np
 import pytest
 import soundfile as sf
+import torch
 
 datasets = pytest.importorskip("datasets")
 
@@ -124,6 +125,67 @@ def test_fgsm_rejects_models_without_waveform_gradient() -> None:
 def test_whisper_tiny_supports_waveform_gradient(whisper_tiny: HFASRModel) -> None:
     assert whisper_tiny.kind == "seq2seq"
     assert whisper_tiny.supports_waveform_gradient is True
+
+
+@pytest.mark.slow
+def test_whisper_torch_mel_matches_hf_numpy(
+    whisper_tiny: HFASRModel,
+    librispeech_sample: dict,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Our torch log-mel must produce numerically equivalent features to HF's
+    numpy WhisperFeatureExtractor — otherwise FGSM optimizes on a slightly
+    different mel than what the model sees at inference time.
+    """
+    audio = librispeech_sample["array"]
+    sr = librispeech_sample["sampling_rate"]
+
+    # Resample to model sample rate so both pipelines see the same input.
+    if sr != whisper_tiny.sample_rate:
+        import torchaudio.functional as TAF
+
+        audio = (
+            TAF.resample(
+                torch.from_numpy(audio),
+                orig_freq=sr,
+                new_freq=whisper_tiny.sample_rate,
+            )
+            .numpy()
+            .astype(np.float32)
+        )
+
+    # HF numpy path (the one used at inference inside transcribe()).
+    numpy_mel = (
+        whisper_tiny._processor(
+            audio,
+            sampling_rate=whisper_tiny.sample_rate,
+            return_tensors="pt",
+        )
+        .input_features.detach()
+        .cpu()
+        .numpy()
+    )  # [1, n_mels, n_frames]
+
+    # Our torch path.
+    audio_torch = torch.from_numpy(audio).to(whisper_tiny.device).unsqueeze(0)
+    torch_mel = whisper_tiny._whisper_log_mel_torch(audio_torch).detach().cpu().numpy()
+
+    assert numpy_mel.shape == torch_mel.shape
+
+    diff = np.abs(numpy_mel - torch_mel)
+    max_abs = float(diff.max())
+    mean_abs = float(diff.mean())
+    print(f"\n  numpy_mel range: [{numpy_mel.min():.4f}, {numpy_mel.max():.4f}]")
+    print(f"  torch_mel range: [{torch_mel.min():.4f}, {torch_mel.max():.4f}]")
+    print(f"  max abs diff:    {max_abs:.6f}")
+    print(f"  mean abs diff:   {mean_abs:.6f}")
+
+    # Tolerance reflects float32 + the manual numpy STFT in transformers vs
+    # torch.stft (different floating-point order of operations, same math).
+    assert np.allclose(numpy_mel, torch_mel, atol=1e-4, rtol=1e-3), (
+        f"Torch log-mel diverges from HF numpy log-mel: "
+        f"max abs diff {max_abs:.6f}, mean abs diff {mean_abs:.6f}"
+    )
 
 
 @pytest.mark.slow

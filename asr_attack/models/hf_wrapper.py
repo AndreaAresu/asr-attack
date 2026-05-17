@@ -368,10 +368,15 @@ class HFASRModel:
 
         Resamples to 16 kHz with ``torchaudio.functional.resample`` (conv1d,
         differentiable), computes the log-mel in torch, and forwards through
-        the model with ``labels=`` so the loss is computed internally. The
-        special-prefix tokens are intentionally omitted from the labels —
-        their absence shifts the absolute loss value but does not break the
-        gradient direction we need for FGSM/PGD.
+        the model with ``labels=`` so the loss is computed internally.
+
+        Builds the labels in Whisper's training format:
+        ``[<|en|>, <|transcribe|>, <|notimestamps|>, ...target..., <|endoftext|>]``.
+        We deliberately omit the leading ``<|startoftranscript|>``: the model
+        prepends ``decoder_start_token_id`` internally via ``shift_right`` when
+        computing the loss. Language is currently fixed to English; the model
+        and dataset we test against are English, and threading a ``language``
+        kwarg through the attack API is out of scope for this change.
         """
         audio_tensor = audio_tensor.to(device=self.device, dtype=torch.float32)
         if audio_tensor.dim() == 1:
@@ -385,7 +390,17 @@ class HFASRModel:
         log_mel = self._whisper_log_mel_torch(audio_tensor)
 
         tokenizer = self._processor.tokenizer
-        label_ids = tokenizer(target, return_tensors="pt").input_ids.to(self.device)
+        prompt_pairs = self._processor.get_decoder_prompt_ids(
+            language="en", task="transcribe"
+        )
+        prefix_ids = [tok for _, tok in prompt_pairs]
+        text_ids = tokenizer(target, add_special_tokens=False).input_ids
+        eot_id = tokenizer.eos_token_id
+        label_ids = torch.tensor(
+            [prefix_ids + list(text_ids) + [eot_id]],
+            device=self.device,
+            dtype=torch.long,
+        )
 
         outputs = self._model(input_features=log_mel, labels=label_ids)
         return outputs.loss
