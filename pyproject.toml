@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "asr-attack"
 version = "0.1.0"
 description = "Adversarial robustness toolkit for Hugging Face ASR models"
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Andrea Aresu", email = "aaresu01@gmail.com" }]
@@ -27,7 +28,9 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
 ]
 dependencies = [
     "torch>=2.1",
@@ -59,7 +62,7 @@ dev = [
 packages = ["asr_attack"]
 
 [tool.hatch.build.targets.sdist]
-include = ["asr_attack", "LICENSE", "pyproject.toml"]
+include = ["asr_attack", "LICENSE", "README.md", "pyproject.toml"]
 
 [tool.ruff]
 target-version = "py310"
