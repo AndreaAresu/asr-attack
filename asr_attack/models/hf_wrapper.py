@@ -55,12 +55,17 @@ class TranscriptionResult:
 def _default_device() -> str:
     """CUDA if available, else CPU. MPS is intentionally skipped as a default.
 
-    Apple's MPS backend does not implement ``aten::_ctc_loss`` (needed by
-    FGSM/PGD on every wav2vec2-family CTC model) and has had patchy support
-    for ``torch.stft`` / FFT backward (the Whisper torch-mel path). Both
-    would crash white-box attacks on Mac when the user didn't explicitly
-    opt in. Inference-only and black-box workflows can still use MPS by
-    passing ``device="mps"`` to ``HFASRModel.from_pretrained`` explicitly.
+    Apple's MPS backend does not implement ``aten::_ctc_loss``. That op is
+    invoked by ``Wav2Vec2ForCTC.forward(..., labels=...)``, which is exactly
+    the path every gradient attack (FGSM, PGD) goes through on the wav2vec2
+    family. The first run on a Mac would crash with a hard
+    ``NotImplementedError``.
+
+    The Whisper white-box path (``torch.stft`` + mel filterbank + cross-
+    entropy backward) currently works on MPS in our setup — verified
+    empirically. So users who only target Whisper, or who only need
+    transcription / black-box attacks, can opt in to MPS by passing
+    ``device="mps"`` to ``HFASRModel.from_pretrained`` explicitly.
     """
     if torch.cuda.is_available():
         return "cuda"
