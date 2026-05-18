@@ -8,28 +8,16 @@ from typing import Any
 
 import numpy as np
 import soundfile as sf
-import torch
 from tqdm.auto import tqdm
 
 from asr_attack.attacks.base import Attack
 from asr_attack.metrics.wer import compute_wer
-from asr_attack.models.hf_wrapper import HFASRModel
+from asr_attack.models.hf_wrapper import HFASRModel, _default_device
 from asr_attack.report import Report, SampleResult
 
 # Each sample is a (waveform, sample_rate, reference_text) triple.
 SampleTuple = tuple[np.ndarray, int, str]
 DatasetLike = str | Iterable[SampleTuple]
-
-
-def _benchmark_default_device() -> str:
-    """CUDA if available, else CPU. We deliberately skip MPS as a default:
-    PyTorch on MPS does not implement ``aten::_ctc_loss``, which would crash
-    any FGSM/PGD run on a CTC model (wav2vec2 family). Users on Mac who only
-    need transcription / black-box attacks can pass ``device="mps"`` explicitly.
-    """
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
 
 
 def run_benchmark(
@@ -65,11 +53,8 @@ def run_benchmark(
         audio_column: name of the audio column. Almost always ``"audio"`` on
             modern HF datasets.
         device: device to load the model on (only used when ``model`` is a
-            string). Defaults to ``"cuda"`` if available else ``"cpu"``.
-            **MPS is intentionally never the default**: PyTorch on MPS lacks
-            ``aten::_ctc_loss``, which would crash FGSM/PGD on CTC models.
-            Pass ``device="mps"`` explicitly if you only need transcription
-            or black-box attacks.
+            string). Defaults to the library-wide default — see
+            :func:`asr_attack.models.hf_wrapper._default_device`.
         verbose: show a tqdm progress bar.
 
     Returns:
@@ -79,7 +64,7 @@ def run_benchmark(
         WERs).
     """
     if isinstance(model, str):
-        chosen_device = device or _benchmark_default_device()
+        chosen_device = device or _default_device()
         if verbose:
             print(f"Loading model {model} on {chosen_device}...")
         model = HFASRModel.from_pretrained(model, device=chosen_device)
