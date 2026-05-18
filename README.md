@@ -1,7 +1,7 @@
 <h1 align="center">asr-attack</h1>
 
 <p align="center">
-  <a href="https://pypi.org/project/asr-attack/"><img alt="PyPI" src="https://img.shields.io/pypi/v/asr-attack.svg?label=pypi&color=blue"></a>
+  <a href="https://pypi.org/project/asr-attack/"><img alt="PyPI" src="https://img.shields.io/pypi/v/asr-attack.svg?label=pypi&color=red"></a>
   <a href="https://www.python.org/downloads/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
 </p>
