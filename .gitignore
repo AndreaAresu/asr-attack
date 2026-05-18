@@ -37,6 +37,7 @@ htmlcov/
 reports/
 *.html
 outputs/
+*json
 
 # Personal notes (not tracked)
 LEARNINGS.md

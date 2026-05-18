@@ -93,6 +93,23 @@ class HFASRModel:
     models (Whisper) so attacks and the benchmark can treat them identically.
     Loads the matching `AutoProcessor` and inspects the config to dispatch
     between `AutoModelForCTC` and `AutoModelForSpeechSeq2Seq`.
+
+    Multilingual models (Whisper, MMS) accept a ``language`` argument. The
+    same string flows through two very different underlying mechanisms:
+
+    - **Whisper**: language is a runtime prompt token. ``self.language``
+      is threaded to ``generate(language=..., task="transcribe")`` for
+      inference and to ``processor.get_decoder_prompt_ids(language=...)``
+      when building the cross-entropy labels for white-box attacks. Use
+      ISO 639-1 codes (``"en"``, ``"it"``, ``"fr"``) or full names
+      (``"english"``). ``None`` keeps Whisper's auto-detection.
+    - **MMS**: language picks a set of weights — a per-language LM head
+      plus an attention adapter. ``self.language`` is passed at load time
+      as ``target_lang=`` so the right adapter and tokenizer vocabulary
+      are activated. Use ISO 639-3 codes (``"eng"``, ``"ita"``, ``"fra"``).
+      ``None`` keeps whatever the checkpoint defaults to.
+    - **Single-language models** (wav2vec2-base-960h, hubert-large-ls960-ft, ...):
+      the argument is stored but has no effect on loading or inference.
     """
 
     def __init__(
@@ -101,11 +118,13 @@ class HFASRModel:
         device: str | None = None,
         dtype: str = "float32",
         sample_rate: int = 16000,
+        language: str | None = None,
     ) -> None:
         self.model_id = model_id
         self.device = device or _default_device()
         self.dtype = dtype
         self.sample_rate = sample_rate
+        self.language = language
         self._model: Any = None
         self._processor: Any = None
         self._kind: str = ""
@@ -154,29 +173,37 @@ class HFASRModel:
         config = AutoConfig.from_pretrained(self.model_id)
         model_type = (getattr(config, "model_type", "") or "").lower()
 
+        # MMS-style models (wav2vec2 backbone + per-language adapters) need
+        # `target_lang=` + `ignore_mismatched_sizes=True` at load time so the
+        # right LM head and adapter are activated. The presence of the
+        # `adapter_attn_dim` config field is the canonical signal.
+        is_mms_style = bool(getattr(config, "adapter_attn_dim", None))
+        model_kwargs: dict[str, Any] = {"torch_dtype": torch_dtype}
+        processor_kwargs: dict[str, Any] = {}
+        if is_mms_style and self.language is not None:
+            model_kwargs["target_lang"] = self.language
+            model_kwargs["ignore_mismatched_sizes"] = True
+            processor_kwargs["target_lang"] = self.language
+
         if model_type in _SEQ2SEQ_MODEL_TYPES:
             self._kind = "seq2seq"
-            model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                self.model_id, torch_dtype=torch_dtype
-            )
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(self.model_id, **model_kwargs)
         elif model_type in _CTC_MODEL_TYPES:
             self._kind = "ctc"
-            model = AutoModelForCTC.from_pretrained(self.model_id, torch_dtype=torch_dtype)
+            model = AutoModelForCTC.from_pretrained(self.model_id, **model_kwargs)
         else:
             # Unknown family: try seq2seq first, then fall back to CTC.
             try:
                 model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                    self.model_id, torch_dtype=torch_dtype
+                    self.model_id, **model_kwargs
                 )
                 self._kind = "seq2seq"
             except (ValueError, OSError, KeyError):
-                model = AutoModelForCTC.from_pretrained(
-                    self.model_id, torch_dtype=torch_dtype
-                )
+                model = AutoModelForCTC.from_pretrained(self.model_id, **model_kwargs)
                 self._kind = "ctc"
 
         self._model = model.to(self.device).eval()
-        self._processor = AutoProcessor.from_pretrained(self.model_id)
+        self._processor = AutoProcessor.from_pretrained(self.model_id, **processor_kwargs)
 
         feature_extractor = getattr(self._processor, "feature_extractor", None)
         fe_sr = getattr(feature_extractor, "sampling_rate", None)
@@ -215,7 +242,16 @@ class HFASRModel:
 
         with torch.inference_mode():
             if self._kind == "seq2seq":
-                generated = self._model.generate(**inputs)
+                # Whisper's generate() accepts `language=` / `task=` to force
+                # the prompt tokens. Other seq2seq models don't, so we gate.
+                generate_kwargs: dict[str, Any] = {}
+                if (
+                    self.language is not None
+                    and getattr(self._model.config, "model_type", "") == "whisper"
+                ):
+                    generate_kwargs["language"] = self.language
+                    generate_kwargs["task"] = "transcribe"
+                generated = self._model.generate(**inputs, **generate_kwargs)
                 texts = self._processor.batch_decode(generated, skip_special_tokens=True)
                 return [
                     TranscriptionResult(text=t.strip(), sample_rate=self.sample_rate)
@@ -383,12 +419,12 @@ class HFASRModel:
         the model with ``labels=`` so the loss is computed internally.
 
         Builds the labels in Whisper's training format:
-        ``[<|en|>, <|transcribe|>, <|notimestamps|>, ...target..., <|endoftext|>]``.
-        We deliberately omit the leading ``<|startoftranscript|>``: the model
-        prepends ``decoder_start_token_id`` internally via ``shift_right`` when
-        computing the loss. Language is currently fixed to English; the model
-        and dataset we test against are English, and threading a ``language``
-        kwarg through the attack API is out of scope for this change.
+        ``[<|lang|>, <|transcribe|>, <|notimestamps|>, ...target..., <|endoftext|>]``.
+        The language token comes from ``self.language`` (set at model
+        construction); ``None`` falls back to English. We deliberately omit
+        the leading ``<|startoftranscript|>``: the model prepends
+        ``decoder_start_token_id`` internally via ``shift_right`` when
+        computing the loss.
         """
         audio_tensor = audio_tensor.to(device=self.device, dtype=torch.float32)
         if audio_tensor.dim() == 1:
@@ -403,7 +439,7 @@ class HFASRModel:
 
         tokenizer = self._processor.tokenizer
         prompt_pairs = self._processor.get_decoder_prompt_ids(
-            language="en", task="transcribe"
+            language=self.language or "en", task="transcribe"
         )
         prefix_ids = [tok for _, tok in prompt_pairs]
         text_ids = tokenizer(target, add_special_tokens=False).input_ids
